@@ -48,6 +48,6 @@ If you use this code or data, please cite:
 ## Contact
 
 **Sergio Eugenio Zanotto**
-> University of Konstanz — Centre of Excellence "The Politics of Inequality"
-> Department of Linguistics / Department of Political Science
+> University of Konstanz — Centre of Excellence "The Politics of Inequality",
+> Department of Linguistics / Department of Political Science,
 > sergio.zanotto@uni-konstanz.de
