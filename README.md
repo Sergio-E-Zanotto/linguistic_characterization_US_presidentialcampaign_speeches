@@ -26,9 +26,9 @@ This repository contains the data and code underlying the doctoral thesis:
 
 ## Pipeline
 
-1. **Feature extraction** (`python/calculate_features/`) — Computes linguistic features from raw U.S. presidential campaign speech transcripts.
-2. **Feature exploration** (`python/display_features/`) — Descriptive inspection and visualization of the extracted features.
-3. **Regression analysis** (`ofOfficial_ideologyvspopulism.Rmd`) — Final statistical models estimating the relationship between linguistic features and populist ideology, run on `Official_df_ideologyvspopulism.zip`.
+1. **Feature exploration and LLM-ready CSV preparation** (`python/display_features/`) — Descriptive inspection and visualization of the raw speech data; transcripts are then processed into CSVs formatted for LLM-based feature extraction.
+2. **Feature extraction** (`python/calculate_features/`) — Linguistic features are computed from the LLM-ready CSVs.
+3. **Aggregation** (`Off_tot.ipynb`) — Extracted features are aggregated into the final dataset (`Official_df_ideologyvspopulism.zip`) used for regression analyses in R.
 
 ## Requirements
 
@@ -47,9 +47,7 @@ If you use this code or data, please cite:
 
 ## Contact
 
-## Contact
-
 **Sergio Eugenio Zanotto**
-University of Konstanz — Centre of Excellence "The Politics of Inequality"
-Department of Linguistics / Department of Political Science
-sergio.zanotto@uni-konstanz.de
+> University of Konstanz — Centre of Excellence "The Politics of Inequality"
+> Department of Linguistics / Department of Political Science
+> sergio.zanotto@uni-konstanz.de
