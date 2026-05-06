@@ -1,0 +1,1464 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+############################################################
+## 0) LIBRARIES + DATASETS
+############################################################
+
+```{r}
+# Core
+library(dplyr)
+library(ggplot2)
+
+theme_set(
+  theme_bw() +          
+  theme(
+    axis.text    = element_text(size = 12),
+    axis.title   = element_text(size = 14),
+    legend.text  = element_text(size = 12),
+    plot.title   = element_blank()          # removes all titles globally
+  )
+)
+  
+library(stringr)
+
+# Models
+library(lme4)
+library(lmerTest)
+
+# Diagnostics
+library(car)          
+library(performance)  
+
+# Effects / predictions
+library(ggeffects)
+library(marginaleffects)
+
+```
+
+
+```{r}
+df <- read.csv("Official_df_ideologyvspopulism.csv") %>%
+  rename(term_id = term)
+
+```
+
+```{r}
+df_crisis_examples <- df %>%
+  mutate(
+    Populism = as.numeric(Populism),
+    crisis_systemic = as.numeric(crisis_systemic),
+    crisis_security = as.numeric(crisis_security),
+    crisis_healthhumanitarian = as.numeric(crisis_healthhumanitarian),
+    crisis_damage = as.numeric(crisis_damage),
+    crisis_economical = as.numeric(crisis_economical),
+    crisis_natural_disasters = as.numeric(crisis_natural_disasters)
+  ) %>%
+  filter(
+    !is.na(text),
+    !is.na(Populism)
+  )
+
+# Helper function for z-scoring
+z <- function(x) {
+  as.numeric(scale(x))
+}
+
+# 1. Populist crisis appeal:
+# high systemic crisis + high security crisis,
+# low health/humanitarian + low damage crisis language
+example_populist_crisis <- df_crisis_examples %>%
+  filter(Populism == 1) %>%
+  mutate(
+    example_score =
+      z(crisis_systemic) +
+      z(crisis_security) -
+      z(crisis_healthhumanitarian) -
+      z(crisis_damage)
+  ) %>%
+  arrange(desc(example_score)) %>%
+  slice(1)
+
+# 2. Non-populist crisis appeal:
+# high health/humanitarian + high damage crisis language,
+# low systemic/security crisis language
+example_nonpopulist_crisis <- df_crisis_examples %>%
+  filter(Populism == 0) %>%
+  mutate(
+    example_score =
+      z(crisis_healthhumanitarian) +
+      z(crisis_damage) -
+      z(crisis_systemic) -
+      z(crisis_security)
+  ) %>%
+  arrange(desc(example_score)) %>%
+  slice(1)
+
+print_crisis_example <- function(x, title) {
+  cat("\n", strrep("=", 100), "\n")
+  cat(title, "\n")
+  cat(strrep("=", 100), "\n")
+  
+  cat("Speech ID:", x$Speech_id, "\n")
+  cat("Party:", x$party, "\n")
+  cat("Person:", x$person, "\n")
+  cat("Date:", as.character(x$date), "\n")
+  cat("Populism:", x$Populism, "\n")
+  cat("Example score:", x$example_score, "\n\n")
+  
+  cat("Systemic crisis:", x$crisis_systemic, "\n")
+  cat("Security crisis:", x$crisis_security, "\n")
+  cat("Health/humanitarian crisis:", x$crisis_healthhumanitarian, "\n")
+  cat("Damage crisis:", x$crisis_damage, "\n")
+  cat("Economic crisis:", x$crisis_economical, "\n")
+  cat("Natural disasters:", x$crisis_natural_disasters, "\n\n")
+  
+  cat("TEXT:\n")
+  cat(x$text, "\n")
+}
+
+print_crisis_example(
+  example_populist_crisis,
+  "POPULIST CRISIS APPEAL: HIGH SYSTEMIC + SECURITY CRISIS, LOW HEALTH/DAMAGE LANGUAGE"
+)
+
+print_crisis_example(
+  example_nonpopulist_crisis,
+  "NON-POPULIST CRISIS APPEAL: HIGH HEALTH/DAMAGE CRISIS, LOW SYSTEMIC/SECURITY LANGUAGE"
+)
+```
+
+
+
+
+```{r}
+
+table_populism <- df %>%
+  filter(Populism == 1) %>%
+  count(election_year, party, individual, name = "n_populist_paragraphs") %>%
+  arrange(election_year, party, desc(n_populist_paragraphs))
+```
+
+
+```{r}
+vars_to_scale <- c(
+  "rile",
+  "intensity_left",
+  "intensity_right",
+  "crisis",
+  "real_crisis", 
+  "constructed_crisis",
+  "crisis_damage",
+  "crisis_economical",
+  "crisis_general",
+  "crisis_healthhumanitarian",
+  "crisis_natural_disasters",
+  "crisis_security",
+  "crisis_systemic",
+  "formality",
+  "scapegoating",
+  "scapegoating_implicit",
+  "scapegoating_victimhood",
+  "scapegoating_victim_us",
+  "scapegoating_victim_me",
+  "scapegoating_them",
+  "sentiment_negtw",
+  "sentiment_postw",
+  "sentiment_tottw",
+  "sentiment_valtw",
+  "sentiment_neg",
+  "sentiment_pos",
+  "sentiment_tot",
+  "sentiment_val",
+  "them_use",
+  "us_use",
+  "vulgarity"
+)
+
+df[vars_to_scale] <- lapply(df[vars_to_scale], function(x) as.numeric(scale(x)))
+
+```
+
+
+
+############################################################
+## 2) DATA PREP FOR ALL INDIVIDUALS (BALANCING)
+############################################################
+
+
+```{r}
+set.seed(42)
+
+df_balanced <- df %>%
+  group_by(individual) %>%
+  group_modify(~ {
+    n_pop <- sum(.x$Populism == 1)
+    df_pop <- filter(.x, Populism == 1)
+    df_non <- filter(.x, Populism == 0)
+
+    if (nrow(df_non) >= n_pop) {
+      bind_rows(df_pop, slice_sample(df_non, n = n_pop))
+    } else {
+      .x
+    }
+  }) %>%
+  ungroup()
+
+```
+
+############################################################
+## 3) BAD MANNERS — Formality
+############################################################
+
+
+```{r}
+m_formality <- lmer(
+  formality ~ Populism + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_formality)
+
+```
+
+```{r}
+m_formality_pop <- glmer(
+  Populism ~ formality + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_formality_pop)
+
+```
+
+```{r}
+pred_formality <- ggpredict(m_formality_pop, terms = "formality [all]")
+
+p <- ggplot(pred_formality, aes(x = x, y = predicted)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .15) +
+  scale_y_continuous(trans = "logit") +
+  labs(x = "Formality", y = "Predicted probability of Populism") +
+  theme_minimal()
+
+ggsave("predicted_populism_by_formality.png", plot = p, width = 7, height = 5, dpi = 300)
+
+```
+
+############################################################
+## 3) BAD MANNERS — Profanity (vulgarity)
+############################################################
+
+
+```{r}
+m_vulgarity <- lmer(
+  vulgarity ~ Populism + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_vulgarity)
+
+```
+
+
+```{r}
+m_vulgarity_pop <- glmer(
+  Populism ~ vulgarity + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_vulgarity_pop)
+
+```
+
+```{r}
+pred_profanity <- ggpredict(m_vulgarity_pop, terms = "vulgarity [all]")
+
+p <- ggplot(pred_profanity, aes(x = x, y = predicted)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .15) +
+  scale_y_continuous(trans = "logit") +
+  labs(x = "Profanity", y = "Predicted probability of Populism") +
+  theme_minimal()
+
+ggsave("predicted_populism_by_vulgarity.png", plot = p, width = 7, height = 5, dpi = 300)
+
+```
+
+############################################################
+## 3) BAD MANNERS — Sentiment
+############################################################
+
+
+```{r}
+# sentiment_label model 
+m_sentimentvt_pop <- glmer(
+  Populism ~ sentiment_label + prior_president + rile + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_sentimentvt_pop)
+
+```
+
+
+```{r}
+m_sentimentvt_pop1 <- glmer(
+  Populism ~ sentiment_valtw + prior_president + rile + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_sentimentvt_pop1)
+
+```
+
+```{r}
+pred_sentiment <- ggpredict(m_sentimentvt_pop1, terms = "sentiment_valtw [all]")
+
+p <- ggplot(pred_sentiment, aes(x = x, y = predicted)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .15) +
+  scale_y_continuous(trans = "logit") +
+  labs(x = "Sentiment Valence", y = "Predicted probability of Populism") +
+  theme_minimal()
+
+ggsave("predicted_populism_by_sentiment_valtw.png", plot = p, width = 7, height = 5, dpi = 300)
+
+```
+
+
+```{r}
+sent_vars <- c("sentiment_valtw", "sentiment_tottw", "sentiment_neg", "sentiment_pos")
+
+m_sent_lmm <- list()
+
+for (v in sent_vars) {
+  cat("\n\n========================================\n")
+  cat("LMM: Outcome =", v, "\n")
+  cat("========================================\n")
+
+  f <- as.formula(
+    paste0(
+      v,
+      " ~ Populism + rile + prior_president + party + factor(election_year) + (1 | individual)"
+    )
+  )
+
+  m_sent_lmm[[v]] <- lmer(f, data = df_balanced)
+  print(summary(m_sent_lmm[[v]]))
+}
+
+
+
+m_sent_glmm <- list()
+
+for (v in sent_vars) {
+  cat("\n\n========================================\n")
+  cat("GLMM: Predictor =", v, "\n")
+  cat("========================================\n")
+
+  f <- as.formula(
+    paste0(
+      "Populism ~ ",
+      v,
+      " + rile + party + prior_president + factor(election_year) + (1 | individual)"
+    )
+  )
+
+  m_sent_glmm[[v]] <- glmer(
+    f,
+    data = df_balanced,
+    family = binomial,
+    control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 5e5))
+  )
+
+  print(summary(m_sent_glmm[[v]]))
+}
+
+```
+
+
+
+
+############################################################
+## 3) BAD MANNERS — Tot
+############################################################
+
+
+```{r}
+m_badmanners <- glmer(
+  Populism ~ formality + vulgarity + sentiment_valtw + prior_president + rile + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_badmanners)
+
+```
+
+
+```{r}
+check_collinearity(m_badmanners)
+
+```
+
+
+```{r}
+m_badmanners_form <- lmer(
+  formality ~ Populism + vulgarity + sentiment_valtw + prior_president + rile + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_badmanners_form)
+
+```
+```{r}
+m_badmanners_prof <- lmer(
+   vulgarity~ Populism + formality + sentiment_valtw + prior_president + rile + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_badmanners_prof)
+
+```
+```{r}
+m_badmanners_prof <- lmer(
+   sentiment_valtw~ Populism + formality + vulgarity + prior_president + rile + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_badmanners_prof)
+
+```
+
+############################################################
+## 4) US VS THEM — Us vs Them (them_use)
+############################################################
+
+
+```{r}
+m_them <- lmer(
+  them_use ~ Populism + prior_president + rile + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_them)
+
+```
+
+```{r}
+m_them_pop <- glmer(
+  Populism ~ them_use + prior_president + rile + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_them_pop)
+
+```
+
+
+############################################################
+## 4) US VS THEM — Us vs Them (Us_use)
+############################################################
+
+
+```{r}
+m_us <- lmer(
+  us_use ~ Populism + prior_president + rile + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_us)
+```
+
+```{r}
+m_us_pop <- glmer(
+  Populism ~ us_use + prior_president + rile + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_us_pop)
+```
+
+```{r}
+pred_ususe <- ggpredict(m_us_pop, terms = "us_use [all]")
+
+p <- ggplot(pred_ususe, aes(x = x, y = predicted)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .15) +
+  scale_y_continuous(trans = "logit") +
+  labs(x = "People-Centric Rhetoric", y = "Predicted probability of Populism") +
+  theme_minimal()
+
+ggsave("predicted_populism_by_us_use.png", plot = p, width = 7, height = 5, dpi = 300)
+```
+
+
+
+############################################################
+## 4) US VS THEM — Us vs Them (tot_use)
+############################################################
+
+```{r}
+m_us_them_pop <- glmer(
+  Populism ~ us_use + them_use + prior_president + rile + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_us_them_pop)
+```
+```{r}
+check_collinearity(m_us_them_pop)
+```
+
+```{r}
+library(emmeans)
+
+grid <- expand.grid(
+  us_use = seq(min(df$us_use), max(df$us_use), length = 50),
+  them_use = seq(min(df$them_use), max(df$them_use), length = 50),
+  rile = mean(df$rile),
+  prior_president = 0,
+  party = "dem",
+  election_year = 2000
+)
+
+grid$pred <- predict(
+  m_us_them_pop, 
+  newdata = grid, 
+  type = "response", 
+  re.form = NA
+)
+
+p<-ggplot(grid, aes(us_use, them_use, fill = pred)) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "P(Populism)") +
+  labs(
+    x = "People-Centric Rhetoric",
+    y = "Anti-Elite Rhetoric"
+  ) +
+  theme_minimal()
+ggsave("predicted_populism_by_usthem_use.png", plot = p, width = 7, height = 5, dpi = 300)
+```
+
+
+############################################################
+## 4) US VS THEM — Scapegoating - blaming, causality
+############################################################
+
+```{r}
+m_scapegoating <- lmer(
+  scapegoating ~ Populism + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_scapegoating)
+
+```
+
+```{r}
+m_scapegoating_pop <- glmer(
+  Populism ~ scapegoating + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_scapegoating_pop)
+
+```
+
+
+############################################################
+## 4) US VS THEM — Scapegoating - sentence_expanded
+############################################################
+
+```{r}
+m_scapegoating_expanding <- lmer(
+  scapegoating_implicit ~ Populism + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_scapegoating_expanding)
+
+```
+
+```{r}
+m_scapegoating_expanding_pop <- glmer(
+  Populism ~ scapegoating_implicit + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_scapegoating_expanding_pop)
+
+```
+############################################################
+## 4) US VS THEM — Scapegoating - sentence_them
+############################################################
+
+```{r}
+m_scapegoating_them <- lmer(
+  scapegoating_them ~ Populism + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_scapegoating_them)
+
+```
+
+```{r}
+m_scapegoating_pop_them <- glmer(
+  Populism ~ scapegoating_them + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_scapegoating_pop_them)
+
+```
+
+############################################################
+## 4) US VS THEM — Victimism - sentence_general
+############################################################
+
+```{r}
+m_scapegoating_victimhood <- lmer(
+  scapegoating_victimhood ~ Populism + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_scapegoating_victimhood)
+
+```
+
+```{r}
+m_scapegoating_victimhood_pop <- glmer(
+  Populism ~ scapegoating_victimhood + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_scapegoating_victimhood_pop)
+
+```
+
+############################################################
+## 4) US VS THEM — Victimism - sentence_us
+############################################################
+
+```{r}
+m_scapegoating_us <- lmer(
+  scapegoating_victim_us ~ Populism + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_scapegoating_us)
+
+```
+
+```{r}
+m_scapegoating_pop_us <- glmer(
+  Populism ~ scapegoating_victim_us + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_scapegoating_pop_us)
+
+```
+
+############################################################
+## 4) US VS THEM — Victimism - sentence_me
+############################################################
+
+```{r}
+m_scapegoating_me <- lmer(
+  scapegoating_victim_me ~ Populism + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_scapegoating_me)
+
+```
+
+```{r}
+m_scapegoating_pop_me <- glmer(
+  Populism ~ scapegoating_victim_me + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_scapegoating_pop_me)
+
+```
+
+
+############################################################
+## 4) US VS THEM — tot - scapegoating
+############################################################
+
+```{r}
+m_scapegoating_tot <- glmer(
+  Populism ~ scapegoating + scapegoating_implicit + scapegoating_them + scapegoating_victimhood + scapegoating_victim_us + scapegoating_victim_me + rile + prior_president + party + factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_scapegoating_tot)
+
+```
+
+```{r}
+check_collinearity(m_scapegoating_tot)
+```
+```{r}
+ame <- avg_slopes(
+  m_scapegoating_tot,
+  variables = c("scapegoating",
+                "scapegoating_implicit",
+                "scapegoating_them",
+                "scapegoating_victimhood",
+                "scapegoating_victim_us",
+                "scapegoating_victim_me"),
+  type = "response"
+)
+
+ame_pp <- ame |>
+  mutate(
+    estimate = estimate * 100,
+    conf.low = conf.low * 100,
+    conf.high = conf.high * 100,
+    term = dplyr::recode(term,
+      scapegoating = "Blame/Causality",
+      scapegoating_implicit = "Generic Scapegoating",
+      scapegoating_them = "Out-group Scapegoating",
+      scapegoating_victimhood = "Generic Victimhood",
+      scapegoating_victim_us = "In-Group Victimhood",
+      scapegoating_victim_me = "Self-Victimhood")
+  )
+
+ame_pp$term <- factor(ame_pp$term, levels = rev(ame_pp$term))
+
+p <- ggplot(ame_pp, aes(x = estimate, y = term)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_point(size = 2) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  labs(x = "Average Marginal Effect on Probability of Populism", y = NULL) +
+  theme_minimal()
+
+ggsave("predicted_populism_by_scapegoating.png", plot = p, width = 7, height = 5, dpi = 300)
+```
+
+
+############################################################
+## 5) CRISES
+############################################################
+
+
+```{r}
+m_crisis <- lmer(
+  crisis ~ Populism + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_crisis)
+
+```
+
+```{r}
+m_crisis_pop <- glmer(
+  Populism ~ crisis + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "nloptwrap", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_crisis_pop)
+
+```
+############################################################
+## 5) CRISES - Real
+############################################################
+
+
+```{r}
+m_crisis_real <- lmer(
+  real_crisis ~ Populism + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_crisis_real)
+
+```
+
+```{r}
+m_crisis_pop_real <- glmer(
+  Populism ~ real_crisis + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_crisis_pop_real)
+
+```
+
+############################################################
+## 5) CRISES - Constructed
+############################################################
+
+
+```{r}
+m_crisis_Constructed <- lmer(
+  constructed_crisis ~ Populism + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_crisis_Constructed)
+
+```
+
+```{r}
+m_crisis_pop_Constructed <- glmer(
+  Populism ~ constructed_crisis + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "nloptwrap", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_crisis_pop_Constructed)
+
+```
+############################################################
+## 5) CRISES - categories
+############################################################
+
+```{r}
+# Crisis category variables you want separate regressions for
+crisis_vars <- c(
+  "crisis_damage",
+  "crisis_economical",
+  "crisis_general",
+  "crisis_healthhumanitarian",
+  "crisis_natural_disasters",
+  "crisis_security",
+  "crisis_systemic"
+)
+
+# Store models here (optional but recommended)
+m_crisis_cat <- list()
+m_crisis_pop_cat <- list()
+
+for (v in crisis_vars) {
+
+  # 1) Outcome model: category score ~ Populism + controls
+  f1 <- as.formula(paste0(
+    v, " ~ Populism + rile + prior_president + party + factor(election_year) + (1 | individual)"
+  ))
+
+  m_crisis_cat[[v]] <- lmer(f1, data = df_balanced)
+
+  cat("\n############################################################\n")
+  cat("## CRISIS CATEGORY (lmer): ", v, "\n")
+  cat("############################################################\n\n")
+  print(summary(m_crisis_cat[[v]]))
+
+
+  # 2) Populism model: Populism ~ category score + controls
+  f2 <- as.formula(paste0(
+    "Populism ~ ", v, " + rile + prior_president + party + factor(election_year) + (1 | individual)"
+  ))
+
+  m_crisis_pop_cat[[v]] <- glmer(
+    f2,
+    data = df_balanced,
+    family = binomial,
+    control = glmerControl(
+      optimizer = "bobyqa",
+      optCtrl = list(maxfun = 2e5)
+    )
+  )
+
+  cat("\n############################################################\n")
+  cat("## CRISIS CATEGORY (glmer): Populism ~ ", v, "\n")
+  cat("############################################################\n\n")
+  print(summary(m_crisis_pop_cat[[v]]))
+}
+```
+
+
+############################################################
+## 5) CRISES - tot
+############################################################
+
+
+```{r}
+m_crisis_tot_pop <- glmer(
+  Populism ~ crisis + real_crisis + constructed_crisis + rile + prior_president + party +
+    factor(election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_crisis_tot_pop)
+
+```
+
+```{r}
+m_crisis_tot_pop_cat <- glmer(
+  Populism ~ 
+    crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    rile + prior_president + party + (1|election_year) +
+    (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_crisis_tot_pop_cat)
+
+
+```
+
+```{r}
+check_collinearity(m_crisis_tot_pop_cat)
+```
+```{r}
+ame_crisis <- avg_slopes(
+  m_crisis_tot_pop_cat,
+  variables = c(
+    "crisis_damage",
+    "crisis_economical",
+    "crisis_general",
+    "crisis_healthhumanitarian",
+    "crisis_natural_disasters",
+    "crisis_security",
+    "crisis_systemic"
+  ),
+  type = "response"
+)
+
+ame_crisis_pp <- ame_crisis %>%
+  mutate(
+    estimate  = estimate * 100,
+    conf.low  = conf.low * 100,
+    conf.high = conf.high * 100,
+    term = dplyr::recode(term,
+      crisis_damage = "Damage",
+      crisis_economical = "Economic",
+      crisis_general = "Generic",
+      crisis_healthhumanitarian = "Health/Humanitarian",
+      crisis_natural_disasters = "Natural disasters",
+      crisis_security = "Security",
+      crisis_systemic = "Systemic"
+    )
+  )
+
+ame_crisis_pp$term <- factor(ame_crisis_pp$term, levels = rev(ame_crisis_pp$term))
+
+
+# Plot
+p <- ggplot(ame_crisis_pp, aes(x = estimate, y = term)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_point(size = 2) +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0.2
+  ) +
+  labs(
+    x = "Average Marginal Effect on Probability of Populism",
+    y = NULL
+  ) +
+  theme_minimal()
+
+ggsave(
+  "predicted_populism_by_crisis_categories.png",
+  plot = p,
+  width = 7,
+  height = 5,
+  dpi = 300
+)
+```
+
+
+############################################################
+## 6) TOTAL INFLUENCE ON POPULISM - all individuals
+##    (cumulative effects of the final regressions)
+############################################################
+
+
+
+```{r}
+m_tot_full <- glmer(
+  Populism ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+    rile + party + prior_president + 
+    (1|election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_tot_full)
+
+```
+```{r}
+check_collinearity(m_tot_full)
+```
+
+```{r}
+m_tot_full_int <- glmer(
+  Populism ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+     intensity_left + intensity_right + party + prior_president + 
+    (1|election_year) + (1 | individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_tot_full_int)
+```
+
+```{r}
+check_collinearity(m_tot_full_int)
+```
+
+
+
+```{r}
+m_ideology_tot_full <- lmer(
+  rile ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+    Populism + party + prior_president + 
+    (1|election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_ideology_tot_full)
+```
+```{r}
+check_collinearity(m_ideology_tot_full)
+```
+
+```{r}
+m_ideology_tot_intensel <- lmer(
+  intensity_left ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me + intensity_right +
+    Populism + party + prior_president + 
+    (1|election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_ideology_tot_intensel)
+```
+
+```{r}
+check_collinearity(m_ideology_tot_intensel)
+```
+
+
+```{r}
+m_ideology_tot_intenser <- lmer(
+  intensity_right ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me + intensity_left +
+    Populism + party + prior_president + 
+    (1|election_year) + (1 | individual),
+  data = df_balanced
+)
+
+summary(m_ideology_tot_intenser)
+```
+
+```{r}
+check_collinearity(m_ideology_tot_intenser)
+```
+
+```{r}
+m_tot_full_pres <- glmer(
+   prior_president ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+    rile + party + Populism + 
+    (1|individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_tot_full_pres)
+```
+
+```{r}
+check_collinearity(m_tot_full_pres)
+```
+```{r}
+m_tot_full_pres_intense <- glmer(
+   prior_president ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+    intensity_left + intensity_right + party + Populism + 
+    (1|individual),
+  data = df_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_tot_full_pres_intense)
+```
+
+```{r}
+check_collinearity(m_tot_full_pres_intense)
+```
+
+
+
+
+############################################################
+## 6) TOTAL INFLUENCE ON POPULISM - only prior_presidents
+##    (cumulative effects of the final regressions)
+############################################################
+
+############################################################
+## IDEOLOGY (df_switchers + calculation)
+############################################################
+
+
+```{r}
+switchers <- c(
+  "Bush_GeorgeHW", "Carter_Jimmy", "Clinton_Bill", "Eisenhower_Dwight",
+  "Nixon_Richard", "Obama_Barack", "Reagan_Ronald", "Trump_Donald"
+)
+
+df_switchers <- df %>%
+  filter(individual %in% switchers)
+
+```
+
+```{r}
+set.seed(42)
+
+df_switchers_balanced <- df_switchers %>%
+  group_by(individual) %>%
+  group_modify(~ {
+    n_pop <- sum(.x$Populism == 1)
+    df_pop <- filter(.x, Populism == 1)
+    df_non <- filter(.x, Populism == 0)
+
+    if (nrow(df_non) >= n_pop) {
+      bind_rows(df_pop, slice_sample(df_non, n = n_pop))
+    } else {
+      .x
+    }
+  }) %>%
+  ungroup()
+
+```
+
+
+```{r}
+df_switchers_balanced %>%
+  group_by(individual) %>%
+  summarise(
+    n_pop = sum(Populism == 1),
+    n_non = sum(Populism == 0)
+  )
+
+```
+
+
+
+############################################################
+## 1B) Populism vs. Ideology (switchers) — regressions
+############################################################
+
+
+```{r}
+# Populism vs. Ideology, populism
+m_pop_logit <- glmer(
+  Populism ~ rile + prior_president + party + (1|individual),
+  data = df_switchers_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_pop_logit)
+
+```
+
+```{r}
+check_collinearity(m_pop_logit)
+```
+
+```{r}
+# Populism vs. Ideology, populism
+m_pop_logit <- glmer(
+  Populism ~ intensity_left + intensity_right + prior_president + party + (1|individual),
+  data = df_switchers_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_pop_logit)
+
+```
+
+
+```{r}
+# Populism vs. Ideology, ideology better
+m_rile_lm_party <- lm(
+  rile ~ party,
+  data = df_switchers_balanced
+)
+
+summary(m_rile_lm_party)
+
+```
+
+
+```{r}
+# Populism vs. Ideology, ideology better
+m_rile_lmm_2 <- lmer(
+  rile ~ Populism + prior_president + party + (1 | individual),
+  data = df_switchers_balanced
+)
+
+summary(m_rile_lmm_2)
+
+```
+
+
+```{r}
+m_tot_pres_switchers <- glm(
+  prior_president ~ Populism + rile + party,
+  data = df_switchers_balanced,
+  family = binomial
+)
+
+summary(m_tot_pres_switchers)
+
+```
+
+```{r}
+m_tot_full <- glmer(
+  Populism ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+    rile + party + prior_president + 
+    (1|individual),
+  data = df_switchers_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_tot_full)
+
+```
+
+
+```{r}
+check_collinearity(m_tot_full)
+```
+
+
+```{r}
+m_tot_full_intensity <- glmer(
+  Populism ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+    intensity_left + intensity_right + party + prior_president + 
+    (1|individual),
+  data = df_switchers_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_tot_full_intensity)
+
+```
+```{r}
+check_collinearity(m_tot_full_intensity)
+```
+
+
+```{r}
+m_ideology_tot_full <- lmer(
+  rile ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+    Populism + party + prior_president + (1|individual),
+  data = df_switchers_balanced
+)
+
+summary(m_ideology_tot_full)
+```
+
+
+```{r}
+check_collinearity(m_ideology_tot_full)
+```
+
+```{r}
+m_ideology_tot_left <- lmer(
+  intensity_left ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+    Populism + party + prior_president + intensity_right + (1|individual),
+  data = df_switchers_balanced
+)
+
+summary(m_ideology_tot_left)
+```
+
+
+
+```{r}
+m_ideology_tot_right <- lmer(
+  intensity_right ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+    Populism + party + prior_president + intensity_left + (1|individual),
+  data = df_switchers_balanced
+)
+
+summary(m_ideology_tot_right)
+```
+
+```{r}
+m_tot_full_pres <- glmer(
+   prior_president ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+    rile + party + Populism + (1|individual),
+  data = df_switchers_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+  
+)
+
+summary(m_tot_full_pres)
+```
+
+
+```{r}
+m_tot_full_pres_int <- glmer(
+   prior_president ~ formality + vulgarity + sentiment_valtw +
+     crisis_damage + crisis_economical  + crisis_general +
+    crisis_healthhumanitarian + crisis_natural_disasters +
+    crisis_security + crisis_systemic +
+    us_use + them_use +
+    scapegoating  + scapegoating_implicit  + scapegoating_victimhood + scapegoating_victim_me +
+    intensity_left + intensity_right + party + Populism + (1|individual),
+  data = df_switchers_balanced,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+  
+)
+
+summary(m_tot_full_pres_int)
+```
+
+
